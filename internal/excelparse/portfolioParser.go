@@ -5,28 +5,28 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 
-	"github.com/russianinvestments/invest-api-go-sdk/investgo"
-	investapi "github.com/russianinvestments/invest-api-go-sdk/proto"
 	"github.com/xuri/excelize/v2"
 )
 
-type PortfolioParser struct {
-	Positions          []*investapi.PortfolioPosition
-	InstrumentsService *investgo.InstrumentsServiceClient
+type Position struct {
+	Ticker         string
+	TotalPrice     float64
+	Sector         string
+	InstrumentType string
 }
 
-func NewPortfolioParser(positions []*investapi.PortfolioPosition, instrumentsService *investgo.InstrumentsServiceClient) (*PortfolioParser, error) {
-	if instrumentsService == nil {
-		return nil, errors.New("InstrumentsService can not be nil")
-	}
+type PortfolioParser struct {
+	Positions []*Position
+}
 
+func NewPortfolioParser(positions []*Position) *PortfolioParser {
 	parser := &PortfolioParser{
-		Positions:          positions,
-		InstrumentsService: instrumentsService,
+		Positions: positions,
 	}
 
-	return parser, nil
+	return parser
 }
 
 func (parser *PortfolioParser) Parse(outFolder string) error {
@@ -46,26 +46,10 @@ func (parser *PortfolioParser) Parse(outFolder string) error {
 		}
 	}()
 
-	_, err = f.NewSheet("Акции")
+	err = parser.parseByInstrumentType(f)
 	if err != nil {
-		return fmt.Errorf("excelize.File.NewSheet: %w", err)
+		return fmt.Errorf("parseByInstrumentType: %v", err)
 	}
-
-	parser.parseByInstrumentType(f, "Акции", "share")
-
-	_, err = f.NewSheet("Облигации")
-	if err != nil {
-		return fmt.Errorf("excelize.File.NewSheet: %w", err)
-	}
-
-	parser.parseByInstrumentType(f, "Облигации", "bond")
-
-	_, err = f.NewSheet("Фонды")
-	if err != nil {
-		return fmt.Errorf("excelize.File.NewSheet: %w", err)
-	}
-
-	parser.parseByInstrumentType(f, "Фонды", "etf")
 
 	wr, err := os.Create(outFolder + "\\investments.xlsx")
 	if err != nil {
@@ -85,44 +69,54 @@ func (parser *PortfolioParser) Parse(outFolder string) error {
 	return nil
 }
 
-func (parser *PortfolioParser) parseByInstrumentType(f *excelize.File, sheetName string, instrumentType string) error {
-	instruments, total := parser.getPositionsByInstrumentType(instrumentType)
-	f.SetCellValue(sheetName, "A1", "TOTAL")
-	f.SetCellValue(sheetName, "B1", total)
+func (parser *PortfolioParser) parseByInstrumentType(f *excelize.File) error {
+	sheets := make(map[string]int)
+	percentStyle, err := f.NewStyle(&excelize.Style{NumFmt: 10})
+	if err != nil {
+		return err
+	}
 
-	row := "2"[0]
-	for _, i := range instruments {
-		shareResp, err := parser.InstrumentsService.InstrumentByFigi(i.Figi)
+	for _, p := range parser.Positions {
+		if _, exists := sheets[p.InstrumentType]; !exists {
+			_, err := f.NewSheet(p.InstrumentType)
+			if err != nil {
+				return err
+			}
+		}
+
+		sheets[p.InstrumentType]++
+		err := f.SetCellValue(p.InstrumentType, "A"+strconv.Itoa(sheets[p.InstrumentType]+1), p.Ticker)
 		if err != nil {
 			return err
 		}
 
-		err = f.SetCellValue(sheetName, "A"+string(row), shareResp.Instrument.Ticker)
+		err = f.SetCellValue(p.InstrumentType, "B"+strconv.Itoa(sheets[p.InstrumentType]+1), p.TotalPrice)
 		if err != nil {
 			return err
 		}
 
-		err = f.SetCellValue(sheetName, "B"+string(row), i.CurrentPrice.ToFloat()*float64(i.Quantity.Units))
+		err = f.SetCellFormula(p.InstrumentType, "C"+strconv.Itoa(sheets[p.InstrumentType]+1), fmt.Sprintf("=B%d/B1", sheets[p.InstrumentType]+1))
+		if err != nil {
+			return err
+		}
+	}
+
+	for sheetName, count := range sheets {
+		err := f.SetCellValue(sheetName, "A1", "TOTAL")
 		if err != nil {
 			return err
 		}
 
-		row++
+		err = f.SetCellFormula(sheetName, "B1", fmt.Sprintf("=SUM(B2:B%d)", count+1))
+		if err != nil {
+			return err
+		}
+
+		err = f.SetCellStyle(sheetName, "C2", fmt.Sprintf("C%d", count+1), percentStyle)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
-}
-
-func (parser *PortfolioParser) getPositionsByInstrumentType(instrumentType string) ([]*investapi.PortfolioPosition, float64) {
-	var shares []*investapi.PortfolioPosition
-	var total float64
-
-	for _, p := range parser.Positions {
-		if p.InstrumentType == instrumentType {
-			shares = append(shares, p)
-			total += p.CurrentPrice.ToFloat() * float64(p.Quantity.Units)
-		}
-	}
-
-	return shares, total
 }
