@@ -61,7 +61,7 @@ func Run() {
 
 	parser := excelparse.NewPortfolioParser(positions)
 
-	err = parser.Parse("out")
+	err = parser.Parse("c:\\Users\\22ale\\OneDrive\\Рабочий стол")
 	if err != nil {
 		logger.Errorf("parse error, %v", err.Error())
 	}
@@ -86,6 +86,10 @@ func getPositions(portfolio *investgo.PortfolioResponse, instrumentsServise *inv
 			TotalPrice:     p.CurrentPrice.ToFloat() * p.Quantity.ToFloat(),
 			Sector:         sector,
 			InstrumentType: p.InstrumentType,
+		}
+
+		if ticker == "TGLD" {
+			positions[i].InstrumentType = "gold"
 		}
 	}
 

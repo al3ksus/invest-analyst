@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strconv"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -71,6 +70,8 @@ func (parser *PortfolioParser) Parse(outFolder string) error {
 
 func (parser *PortfolioParser) parseByInstrumentType(f *excelize.File) error {
 	sheets := make(map[string]int)
+	sectorRows := make(map[string]int)
+	sectorPrices := make(map[string]float64)
 	percentStyle, err := f.NewStyle(&excelize.Style{NumFmt: 10})
 	if err != nil {
 		return err
@@ -84,30 +85,31 @@ func (parser *PortfolioParser) parseByInstrumentType(f *excelize.File) error {
 			}
 		}
 
+		isNew := false
+		sectorSheet := fmt.Sprintf("%s%s", p.Sector, p.InstrumentType)
+		if _, exists := sectorRows[sectorSheet]; !exists && p.Sector != "" {
+			sectorRows[p.InstrumentType]++
+			sectorRows[sectorSheet] = sectorRows[p.InstrumentType]
+			isNew = true
+		}
+
+		sectorPrices[sectorSheet] += p.TotalPrice
 		sheets[p.InstrumentType]++
-		err := f.SetCellValue(p.InstrumentType, "A"+strconv.Itoa(sheets[p.InstrumentType]+1), p.Ticker)
+		err = setPositionCell(f, p, sheets[p.InstrumentType]+1)
 		if err != nil {
 			return err
 		}
 
-		err = f.SetCellValue(p.InstrumentType, "B"+strconv.Itoa(sheets[p.InstrumentType]+1), p.TotalPrice)
-		if err != nil {
-			return err
-		}
-
-		err = f.SetCellFormula(p.InstrumentType, "C"+strconv.Itoa(sheets[p.InstrumentType]+1), fmt.Sprintf("=B%d/B1", sheets[p.InstrumentType]+1))
-		if err != nil {
-			return err
+		if p.Sector != "" {
+			err = setSectorCell(f, p, sectorRows[sectorSheet]+1, sectorPrices[sectorSheet], isNew)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	for sheetName, count := range sheets {
-		err := f.SetCellValue(sheetName, "A1", "TOTAL")
-		if err != nil {
-			return err
-		}
-
-		err = f.SetCellFormula(sheetName, "B1", fmt.Sprintf("=SUM(B2:B%d)", count+1))
+		err = setTotalCell(f, sheetName, count+1)
 		if err != nil {
 			return err
 		}
@@ -116,6 +118,65 @@ func (parser *PortfolioParser) parseByInstrumentType(f *excelize.File) error {
 		if err != nil {
 			return err
 		}
+
+		err = f.SetCellStyle(sheetName, "G2", fmt.Sprintf("G%d", sectorRows[sheetName]+1), percentStyle)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func setPositionCell(f *excelize.File, pos *Position, posRow int) error {
+	err := f.SetCellValue(pos.InstrumentType, fmt.Sprintf("A%d", posRow), pos.Ticker)
+	if err != nil {
+		return err
+	}
+
+	err = f.SetCellValue(pos.InstrumentType, fmt.Sprintf("B%d", posRow), pos.TotalPrice)
+	if err != nil {
+		return err
+	}
+
+	err = f.SetCellFormula(pos.InstrumentType, fmt.Sprintf("C%d", posRow), fmt.Sprintf("=B%d/B1", posRow))
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func setSectorCell(f *excelize.File, pos *Position, sectorRow int, sectorPrice float64, isNew bool) error {
+	if isNew {
+		err := f.SetCellValue(pos.InstrumentType, fmt.Sprintf("E%d", sectorRow), pos.Sector)
+		if err != nil {
+			return err
+		}
+
+		err = f.SetCellFormula(pos.InstrumentType, fmt.Sprintf("G%d", sectorRow), fmt.Sprintf("=F%d/B1", sectorRow))
+		if err != nil {
+			return err
+		}
+	}
+
+	err := f.SetCellValue(pos.InstrumentType, fmt.Sprintf("F%d", sectorRow), sectorPrice)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func setTotalCell(f *excelize.File, sheetName string, countPos int) error {
+	err := f.SetCellValue(sheetName, "A1", "TOTAL")
+	if err != nil {
+		return err
+	}
+
+	err = f.SetCellFormula(sheetName, "B1", fmt.Sprintf("=SUM(B2:B%d)", countPos))
+	if err != nil {
+		return err
 	}
 
 	return nil
