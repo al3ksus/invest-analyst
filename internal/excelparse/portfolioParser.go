@@ -6,27 +6,36 @@ import (
 	"log"
 	"os"
 
-	"github.com/russianinvestments/invest-api-go-sdk/investgo"
-	investapi "github.com/russianinvestments/invest-api-go-sdk/proto"
 	"github.com/xuri/excelize/v2"
 )
 
-type PortfolioParser struct {
-	Positions          []*investapi.PortfolioPosition
-	InstrumentsService *investgo.InstrumentsServiceClient
+type Position struct {
+	Ticker         string
+	TotalPrice     float64
+	Sector         string
+	InstrumentType string
 }
 
-func NewPortfolioParser(positions []*investapi.PortfolioPosition, instrumentsService *investgo.InstrumentsServiceClient) (*PortfolioParser, error) {
-	if instrumentsService == nil {
-		return nil, errors.New("InstrumentsService can not be nil")
-	}
+type PortfolioParser struct {
+	Positions []*Position
+}
 
+var INSTRUMENT_TYPE_RUSSIAN_NAMES = map[string]string{
+	"share":    "Акции",
+	"bond":     "Облигации",
+	"gold":     "Золото",
+	"etf":      "Фонды",
+	"currency": "Валюта",
+	"option":   "Опционы",
+	"futures":  "Фьючерсы",
+}
+
+func NewPortfolioParser(positions []*Position) *PortfolioParser {
 	parser := &PortfolioParser{
-		Positions:          positions,
-		InstrumentsService: instrumentsService,
+		Positions: positions,
 	}
 
-	return parser, nil
+	return parser
 }
 
 func (parser *PortfolioParser) Parse(outFolder string) error {
@@ -46,26 +55,17 @@ func (parser *PortfolioParser) Parse(outFolder string) error {
 		}
 	}()
 
-	_, err = f.NewSheet("Акции")
+	sheets, err := parser.parseByInstrumentType(f)
 	if err != nil {
-		return fmt.Errorf("excelize.File.NewSheet: %w", err)
+		return fmt.Errorf("parseByInstrumentType: %v", err)
 	}
 
-	parser.parseByInstrumentType(f, "Акции", "share")
-
-	_, err = f.NewSheet("Облигации")
-	if err != nil {
-		return fmt.Errorf("excelize.File.NewSheet: %w", err)
+	if len(sheets) != 0 {
+		err = parser.parseTotalSheet(f, sheets)
+		if err != nil {
+			return fmt.Errorf("parseTotalSheet: %w", err)
+		}
 	}
-
-	parser.parseByInstrumentType(f, "Облигации", "bond")
-
-	_, err = f.NewSheet("Фонды")
-	if err != nil {
-		return fmt.Errorf("excelize.File.NewSheet: %w", err)
-	}
-
-	parser.parseByInstrumentType(f, "Фонды", "etf")
 
 	wr, err := os.Create(outFolder + "\\investments.xlsx")
 	if err != nil {
@@ -85,44 +85,167 @@ func (parser *PortfolioParser) Parse(outFolder string) error {
 	return nil
 }
 
-func (parser *PortfolioParser) parseByInstrumentType(f *excelize.File, sheetName string, instrumentType string) error {
-	instruments, total := parser.getPositionsByInstrumentType(instrumentType)
-	f.SetCellValue(sheetName, "A1", "TOTAL")
-	f.SetCellValue(sheetName, "B1", total)
+func (parser *PortfolioParser) parseByInstrumentType(f *excelize.File) ([]string, error) {
+	sheetList := []string{}
+	sheets := make(map[string]int)
+	sectorRows := make(map[string]int)
+	sectorPrices := make(map[string]float64)
+	percentStyle, err := f.NewStyle(&excelize.Style{NumFmt: 10})
+	if err != nil {
+		return nil, err
+	}
 
-	row := "2"[0]
-	for _, i := range instruments {
-		shareResp, err := parser.InstrumentsService.InstrumentByFigi(i.Figi)
-		if err != nil {
-			return err
+	for _, p := range parser.Positions {
+		if _, exists := sheets[p.InstrumentType]; !exists {
+			_, err := f.NewSheet(INSTRUMENT_TYPE_RUSSIAN_NAMES[p.InstrumentType])
+			if err != nil {
+				return nil, err
+			}
+			sheetList = append(sheetList, INSTRUMENT_TYPE_RUSSIAN_NAMES[p.InstrumentType])
 		}
 
-		err = f.SetCellValue(sheetName, "A"+string(row), shareResp.Instrument.Ticker)
-		if err != nil {
-			return err
+		isNew := false
+		sectorSheet := fmt.Sprintf("%s%s", p.Sector, p.InstrumentType)
+		if _, exists := sectorRows[sectorSheet]; !exists && p.Sector != "" {
+			sectorRows[p.InstrumentType]++
+			sectorRows[sectorSheet] = sectorRows[p.InstrumentType]
+			isNew = true
 		}
 
-		err = f.SetCellValue(sheetName, "B"+string(row), i.CurrentPrice.ToFloat()*float64(i.Quantity.Units))
+		sectorPrices[sectorSheet] += p.TotalPrice
+		sheets[p.InstrumentType]++
+		err = setPositionCell(f, p, sheets[p.InstrumentType]+1)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		row++
+		if p.Sector != "" {
+			err = setSectorCell(f, p, sectorRows[sectorSheet]+1, sectorPrices[sectorSheet], isNew)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	for sheetName, count := range sheets {
+		err = setTotalCell(f, INSTRUMENT_TYPE_RUSSIAN_NAMES[sheetName], count+1)
+		if err != nil {
+			return nil, err
+		}
+
+		err = f.SetCellStyle(INSTRUMENT_TYPE_RUSSIAN_NAMES[sheetName], "C2", fmt.Sprintf("C%d", count+1), percentStyle)
+		if err != nil {
+			return nil, err
+		}
+
+		err = f.SetCellStyle(INSTRUMENT_TYPE_RUSSIAN_NAMES[sheetName], "G2", fmt.Sprintf("G%d", sectorRows[sheetName]+1), percentStyle)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return sheetList, nil
+}
+
+func setPositionCell(f *excelize.File, pos *Position, posRow int) error {
+	err := f.SetCellValue(INSTRUMENT_TYPE_RUSSIAN_NAMES[pos.InstrumentType], fmt.Sprintf("A%d", posRow), pos.Ticker)
+	if err != nil {
+		return err
+	}
+
+	err = f.SetCellValue(INSTRUMENT_TYPE_RUSSIAN_NAMES[pos.InstrumentType], fmt.Sprintf("B%d", posRow), pos.TotalPrice)
+	if err != nil {
+		return err
+	}
+
+	err = f.SetCellFormula(INSTRUMENT_TYPE_RUSSIAN_NAMES[pos.InstrumentType], fmt.Sprintf("C%d", posRow), fmt.Sprintf("=B%d/B1", posRow))
+	if err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func (parser *PortfolioParser) getPositionsByInstrumentType(instrumentType string) ([]*investapi.PortfolioPosition, float64) {
-	var shares []*investapi.PortfolioPosition
-	var total float64
+func setSectorCell(f *excelize.File, pos *Position, sectorRow int, sectorPrice float64, isNew bool) error {
+	if isNew {
+		err := f.SetCellValue(INSTRUMENT_TYPE_RUSSIAN_NAMES[pos.InstrumentType], fmt.Sprintf("E%d", sectorRow), pos.Sector)
+		if err != nil {
+			return err
+		}
 
-	for _, p := range parser.Positions {
-		if p.InstrumentType == instrumentType {
-			shares = append(shares, p)
-			total += p.CurrentPrice.ToFloat() * float64(p.Quantity.Units)
+		err = f.SetCellFormula(INSTRUMENT_TYPE_RUSSIAN_NAMES[pos.InstrumentType], fmt.Sprintf("G%d", sectorRow), fmt.Sprintf("=F%d/B1", sectorRow))
+		if err != nil {
+			return err
 		}
 	}
 
-	return shares, total
+	err := f.SetCellValue(INSTRUMENT_TYPE_RUSSIAN_NAMES[pos.InstrumentType], fmt.Sprintf("F%d", sectorRow), sectorPrice)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func setTotalCell(f *excelize.File, sheetName string, countPos int) error {
+	err := f.SetCellValue(sheetName, "A1", "Всего")
+	if err != nil {
+		return err
+	}
+
+	err = f.SetCellFormula(sheetName, "B1", fmt.Sprintf("=SUM(B2:B%d)", countPos))
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (parser *PortfolioParser) parseTotalSheet(f *excelize.File, sheets []string) error {
+	totalSheetName := "Портфель"
+	percentStyle, err := f.NewStyle(&excelize.Style{NumFmt: 10})
+	if err != nil {
+		return err
+	}
+
+	_, err = f.NewSheet(totalSheetName)
+	if err != nil {
+		return err
+	}
+
+	err = f.SetCellValue(totalSheetName, "A1", "Всего")
+	if err != nil {
+		return err
+	}
+
+	row := 2
+	for _, s := range sheets {
+		err = f.SetCellValue(totalSheetName, fmt.Sprintf("A%d", row), s)
+		if err != nil {
+			return err
+		}
+
+		err = f.SetCellFormula(totalSheetName, fmt.Sprintf("B%d", row), fmt.Sprintf("=%s!B1", s))
+		if err != nil {
+			return err
+		}
+
+		err = f.SetCellFormula(totalSheetName, fmt.Sprintf("C%d", row), fmt.Sprintf("=B%d/B1", row))
+		if err != nil {
+			return err
+		}
+		row++
+	}
+
+	err = setTotalCell(f, totalSheetName, len(sheets)+1)
+	if err != nil {
+		return err
+	}
+
+	err = f.SetCellStyle(totalSheetName, "C2", fmt.Sprintf("C%d", len(sheets)+1), percentStyle)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
